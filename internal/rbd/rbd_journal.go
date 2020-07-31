@@ -23,7 +23,7 @@ import (
 
 	"github.com/ceph/ceph-csi/internal/util"
 
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 func validateNonEmptyField(field, fieldName, structName string) error {
@@ -151,11 +151,10 @@ func checkSnapCloneExists(ctx context.Context, parentVol *rbdVolume, rbdSnap *rb
 	// Fetch on-disk image attributes
 	err = vol.getImageInfo()
 	if err != nil {
-		var esnf ErrSnapNotFound
-		if errors.As(err, &esnf) {
+		if errors.Is(err, ErrImageNotFound) {
 			err = parentVol.deleteSnapshot(ctx, rbdSnap)
 			if err != nil {
-				if _, ok := err.(ErrSnapNotFound); !ok {
+				if !errors.Is(err, ErrSnapNotFound) {
 					klog.Errorf(util.Log(ctx, "failed to delete snapshot %s: %v"), rbdSnap, err)
 					return false, err
 				}
@@ -180,8 +179,8 @@ func checkSnapCloneExists(ctx context.Context, parentVol *rbdVolume, rbdSnap *rb
 	}
 
 	// check snapshot exists if not create it
-	_, err = vol.getSnapInfo(rbdSnap)
-	if _, ok := err.(ErrSnapNotFound); ok {
+	err = vol.checkSnapExists(rbdSnap)
+	if errors.Is(err, ErrSnapNotFound) {
 		// create snapshot
 		sErr := vol.createSnapshot(ctx, rbdSnap)
 		if sErr != nil {
@@ -213,7 +212,7 @@ func checkSnapCloneExists(ctx context.Context, parentVol *rbdVolume, rbdSnap *rb
 		return false, err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "found existing image (%s) with name (%s) for request (%s)"),
+	util.DebugLog(ctx, "found existing image (%s) with name (%s) for request (%s)",
 		rbdSnap.SnapID, rbdSnap.RbdSnapName, rbdSnap.RequestName)
 	return true, nil
 }
@@ -221,12 +220,18 @@ func checkSnapCloneExists(ctx context.Context, parentVol *rbdVolume, rbdSnap *rb
 /*
 Check comment on checkSnapExists, to understand how this function behaves
 
-**NOTE:** These functions manipulate the rados omaps that hold information regarding
-volume names as requested by the CSI drivers. Hence, these need to be invoked only when the
-respective CSI snapshot or volume name based locks are held, as otherwise racy access to these
-omaps may end up leaving the omaps in an inconsistent state.
+**NOTE:** These functions manipulate the rados omaps that hold information
+regarding volume names as requested by the CSI drivers. Hence, these need to be
+invoked only when the respective CSI snapshot or volume name based locks are
+held, as otherwise racy access to these omaps may end up leaving the omaps in
+an inconsistent state.
+
+parentVol is required to check the clone is created from the requested parent
+image or not, if temporary snapshots and clones created for the volume when the
+content source is volume we need to recover from the stale entries or complete
+the pending operations.
 */
-func (rv *rbdVolume) Exists(ctx context.Context) (bool, error) {
+func (rv *rbdVolume) Exists(ctx context.Context, parentVol *rbdVolume) (bool, error) {
 	err := validateRbdVol(rv)
 	if err != nil {
 		return false, err
@@ -273,8 +278,17 @@ func (rv *rbdVolume) Exists(ctx context.Context) (bool, error) {
 	// Fetch on-disk image attributes and compare against request
 	err = rv.getImageInfo()
 	if err != nil {
-		var einf ErrImageNotFound
-		if errors.As(err, &einf) {
+		if errors.Is(err, ErrImageNotFound) {
+			// Need to check cloned info here not on createvolume,
+			if parentVol != nil {
+				found, cErr := rv.checkCloneImage(ctx, parentVol)
+				if found && cErr == nil {
+					return true, nil
+				}
+				if cErr != nil {
+					return false, cErr
+				}
+			}
 			err = j.UndoReservation(ctx, rv.JournalPool, rv.Pool,
 				rv.RbdImageName, rv.RequestName)
 			return false, err
@@ -301,9 +315,8 @@ func (rv *rbdVolume) Exists(ctx context.Context) (bool, error) {
 
 	// size checks
 	if rv.VolSize < requestSize {
-		err = fmt.Errorf("image with the same name (%s) but with different size already exists",
-			rv.RbdImageName)
-		return false, ErrVolNameConflict{rv.RbdImageName, err}
+		return false, fmt.Errorf("%w: image with the same name (%s) but with different size already exists",
+			ErrVolNameConflict, rv.RbdImageName)
 	}
 	// TODO: We should also ensure image features and format is the same
 
@@ -314,14 +327,14 @@ func (rv *rbdVolume) Exists(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "found existing volume (%s) with image name (%s) for request (%s)"),
+	util.DebugLog(ctx, "found existing volume (%s) with image name (%s) for request (%s)",
 		rv.VolID, rv.RbdImageName, rv.RequestName)
 
 	return true, nil
 }
 
 // reserveSnap is a helper routine to request a rbdSnapshot name reservation and generate the
-// volume ID for the generated name
+// volume ID for the generated name.
 func reserveSnap(ctx context.Context, rbdSnap *rbdSnapshot, rbdVol *rbdVolume, cr *util.Credentials) error {
 	var (
 		err error
@@ -351,7 +364,7 @@ func reserveSnap(ctx context.Context, rbdSnap *rbdSnapshot, rbdVol *rbdVolume, c
 		return err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "generated Volume ID (%s) and image name (%s) for request name (%s)"),
+	util.DebugLog(ctx, "generated Volume ID (%s) and image name (%s) for request name (%s)",
 		rbdSnap.SnapID, rbdSnap.RbdSnapName, rbdSnap.RequestName)
 
 	return nil
@@ -389,7 +402,7 @@ func updateTopologyConstraints(rbdVol *rbdVolume, rbdSnap *rbdSnapshot) error {
 }
 
 // reserveVol is a helper routine to request a rbdVolume name reservation and generate the
-// volume ID for the generated name
+// volume ID for the generated name.
 func reserveVol(ctx context.Context, rbdVol *rbdVolume, rbdSnap *rbdSnapshot, cr *util.Credentials) error {
 	var (
 		err error
@@ -429,13 +442,13 @@ func reserveVol(ctx context.Context, rbdVol *rbdVolume, rbdSnap *rbdSnapshot, cr
 		return err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "generated Volume ID (%s) and image name (%s) for request name (%s)"),
+	util.DebugLog(ctx, "generated Volume ID (%s) and image name (%s) for request name (%s)",
 		rbdVol.VolID, rbdVol.RbdImageName, rbdVol.RequestName)
 
 	return nil
 }
 
-// undoSnapReservation is a helper routine to undo a name reservation for rbdSnapshot
+// undoSnapReservation is a helper routine to undo a name reservation for rbdSnapshot.
 func undoSnapReservation(ctx context.Context, rbdSnap *rbdSnapshot, cr *util.Credentials) error {
 	j, err := snapJournal.Connect(rbdSnap.Monitors, cr)
 	if err != nil {
@@ -450,7 +463,7 @@ func undoSnapReservation(ctx context.Context, rbdSnap *rbdSnapshot, cr *util.Cre
 	return err
 }
 
-// undoVolReservation is a helper routine to undo a name reservation for rbdVolume
+// undoVolReservation is a helper routine to undo a name reservation for rbdVolume.
 func undoVolReservation(ctx context.Context, rbdVol *rbdVolume, cr *util.Credentials) error {
 	j, err := volJournal.Connect(rbdVol.Monitors, cr)
 	if err != nil {

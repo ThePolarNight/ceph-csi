@@ -7,16 +7,16 @@ import (
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
-// ValidateURL validates the url
+// ValidateURL validates the url.
 func ValidateURL(c *Config) error {
 	_, err := url.Parse(c.MetricsPath)
 	return err
 }
 
-// StartMetricsServer starts http server
+// StartMetricsServer starts http server.
 func StartMetricsServer(c *Config) {
 	addr := net.JoinHostPort(c.MetricsIP, strconv.Itoa(c.MetricsPort))
 	http.Handle(c.MetricsPath, promhttp.Handler())

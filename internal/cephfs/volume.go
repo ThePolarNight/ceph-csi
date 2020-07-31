@@ -18,15 +18,13 @@ package cephfs
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path"
 	"strconv"
 	"strings"
 
 	"github.com/ceph/ceph-csi/internal/util"
 
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 var (
@@ -38,26 +36,23 @@ var (
 	clusterAdditionalInfo = make(map[string]*localClusterState)
 
 	inValidCommmand = "no valid command found"
+
+	// ceph returns `Error ENOENT:` when subvolume or subvolume group doesnot
+	// exist.
+	errNotFoundString = "Error ENOENT:"
 )
 
-func getCephRootVolumePathLocalDeprecated(volID volumeID) string {
-	return path.Join(getCephRootPathLocalDeprecated(volID), "csi-volumes", string(volID))
-}
+const (
+	cephEntityClientPrefix = "client."
+)
 
 func getVolumeRootPathCephDeprecated(volID volumeID) string {
 	return path.Join("/", "csi-volumes", string(volID))
 }
 
-func getCephRootPathLocalDeprecated(volID volumeID) string {
-	return fmt.Sprintf("%s/controller/volumes/root-%s", PluginFolder, string(volID))
-}
-
-func getVolumeNotFoundErrorString(volID volumeID) string {
-	return fmt.Sprintf("Error ENOENT: Subvolume '%s' not found", string(volID))
-}
-
 func getVolumeRootPathCeph(ctx context.Context, volOptions *volumeOptions, cr *util.Credentials, volID volumeID) (string, error) {
 	stdout, stderr, err := util.ExecCommand(
+		ctx,
 		"ceph",
 		"fs",
 		"subvolume",
@@ -72,15 +67,15 @@ func getVolumeRootPathCeph(ctx context.Context, volOptions *volumeOptions, cr *u
 		"--keyfile="+cr.KeyFile)
 
 	if err != nil {
-		klog.Errorf(util.Log(ctx, "failed to get the rootpath for the vol %s(%s)"), string(volID), err)
+		klog.Errorf(util.Log(ctx, "failed to get the rootpath for the vol %s(%s) stdError %s"), string(volID), err, stderr)
 
-		if strings.Contains(string(stderr), getVolumeNotFoundErrorString(volID)) {
-			return "", ErrVolumeNotFound{err}
+		if strings.HasPrefix(stderr, errNotFoundString) {
+			return "", util.JoinErrors(ErrVolumeNotFound, err)
 		}
 
 		return "", err
 	}
-	return strings.TrimSuffix(string(stdout), "\n"), nil
+	return strings.TrimSuffix(stdout, "\n"), nil
 }
 
 type localClusterState struct {
@@ -116,7 +111,7 @@ func createVolume(ctx context.Context, volOptions *volumeOptions, cr *util.Crede
 			klog.Errorf(util.Log(ctx, "failed to create subvolume group %s, for the vol %s(%s)"), volOptions.SubvolumeGroup, string(volID), err)
 			return err
 		}
-		klog.V(4).Infof(util.Log(ctx, "cephfs: created subvolume group %s"), volOptions.SubvolumeGroup)
+		util.DebugLog(ctx, "cephfs: created subvolume group %s", volOptions.SubvolumeGroup)
 		clusterAdditionalInfo[volOptions.ClusterID].subVolumeGroupCreated = true
 	}
 
@@ -201,70 +196,6 @@ func resizeVolume(ctx context.Context, volOptions *volumeOptions, cr *util.Crede
 	return createVolume(ctx, volOptions, cr, volID, bytesQuota)
 }
 
-func mountCephRoot(ctx context.Context, volID volumeID, volOptions *volumeOptions, adminCr *util.Credentials) error {
-	cephRoot := getCephRootPathLocalDeprecated(volID)
-
-	// Root path is not set for dynamically provisioned volumes
-	// Access to cephfs's / is required
-	volOptions.RootPath = "/"
-
-	if err := util.CreateMountPoint(cephRoot); err != nil {
-		return err
-	}
-
-	m, err := newMounter(volOptions)
-	if err != nil {
-		return fmt.Errorf("failed to create mounter: %v", err)
-	}
-
-	if err = m.mount(ctx, cephRoot, adminCr, volOptions); err != nil {
-		return fmt.Errorf("error mounting ceph root: %v", err)
-	}
-
-	return nil
-}
-
-func unmountCephRoot(ctx context.Context, volID volumeID) {
-	cephRoot := getCephRootPathLocalDeprecated(volID)
-
-	if err := unmountVolume(ctx, cephRoot); err != nil {
-		klog.Errorf(util.Log(ctx, "failed to unmount %s with error %s"), cephRoot, err)
-	} else {
-		if err := os.Remove(cephRoot); err != nil {
-			klog.Errorf(util.Log(ctx, "failed to remove %s with error %s"), cephRoot, err)
-		}
-	}
-}
-
-func purgeVolumeDeprecated(ctx context.Context, volID volumeID, adminCr *util.Credentials, volOptions *volumeOptions) error {
-	if err := mountCephRoot(ctx, volID, volOptions, adminCr); err != nil {
-		return err
-	}
-	defer unmountCephRoot(ctx, volID)
-
-	var (
-		volRoot         = getCephRootVolumePathLocalDeprecated(volID)
-		volRootDeleting = volRoot + "-deleting"
-	)
-
-	if pathExists(volRoot) {
-		if err := os.Rename(volRoot, volRootDeleting); err != nil {
-			return fmt.Errorf("couldn't mark volume %s for deletion: %v", volID, err)
-		}
-	} else {
-		if !pathExists(volRootDeleting) {
-			klog.V(4).Infof(util.Log(ctx, "cephfs: volume %s not found, assuming it to be already deleted"), volID)
-			return nil
-		}
-	}
-
-	if err := os.RemoveAll(volRootDeleting); err != nil {
-		return fmt.Errorf("failed to delete volume %s: %v", volID, err)
-	}
-
-	return nil
-}
-
 func purgeVolume(ctx context.Context, volID volumeID, cr *util.Credentials, volOptions *volumeOptions) error {
 	err := execCommandErr(
 		ctx,
@@ -283,8 +214,8 @@ func purgeVolume(ctx context.Context, volID volumeID, cr *util.Credentials, volO
 	if err != nil {
 		klog.Errorf(util.Log(ctx, "failed to purge subvolume %s(%s) in fs %s"), string(volID), err, volOptions.FsName)
 
-		if strings.Contains(err.Error(), getVolumeNotFoundErrorString(volID)) {
-			return ErrVolumeNotFound{err}
+		if strings.HasPrefix(err.Error(), errNotFoundString) {
+			return util.JoinErrors(ErrVolumeNotFound, err)
 		}
 
 		return err

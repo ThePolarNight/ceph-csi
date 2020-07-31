@@ -17,7 +17,7 @@ limitations under the License.
 package cephfs
 
 import (
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 
 	csicommon "github.com/ceph/ceph-csi/internal/csi-common"
 	"github.com/ceph/ceph-csi/internal/journal"
@@ -37,10 +37,7 @@ const (
 	radosNamespace = "csi"
 )
 
-// PluginFolder defines the location of ceph plugin
-var PluginFolder = ""
-
-// Driver contains the default identity,node and controller struct
+// Driver contains the default identity,node and controller struct.
 type Driver struct {
 	cd *csicommon.CSIDriver
 
@@ -59,23 +56,22 @@ var (
 	volJournal *journal.Config
 )
 
-// NewDriver returns new ceph driver
+// NewDriver returns new ceph driver.
 func NewDriver() *Driver {
 	return &Driver{}
 }
 
-// NewIdentityServer initialize a identity server for ceph CSI driver
+// NewIdentityServer initialize a identity server for ceph CSI driver.
 func NewIdentityServer(d *csicommon.CSIDriver) *IdentityServer {
 	return &IdentityServer{
 		DefaultIdentityServer: csicommon.NewDefaultIdentityServer(d),
 	}
 }
 
-// NewControllerServer initialize a controller server for ceph CSI driver
-func NewControllerServer(d *csicommon.CSIDriver, cachePersister util.CachePersister) *ControllerServer {
+// NewControllerServer initialize a controller server for ceph CSI driver.
+func NewControllerServer(d *csicommon.CSIDriver) *ControllerServer {
 	return &ControllerServer{
 		DefaultControllerServer: csicommon.NewDefaultControllerServer(d),
-		MetadataStore:           cachePersister,
 		VolumeLocks:             util.NewVolumeLocks(),
 	}
 }
@@ -89,14 +85,12 @@ func NewNodeServer(d *csicommon.CSIDriver, t string, topology map[string]string)
 }
 
 // Run start a non-blocking grpc controller,node and identityserver for
-// ceph CSI driver which can serve multiple parallel requests
-func (fs *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
+// ceph CSI driver which can serve multiple parallel requests.
+func (fs *Driver) Run(conf *util.Config) {
 	var err error
 	var topology map[string]string
 
 	// Configuration
-	PluginFolder = conf.PluginPath
-
 	if err = loadAvailableMounters(conf); err != nil {
 		klog.Fatalf("cephfs: failed to load ceph mounters: %v", err)
 	}
@@ -142,7 +136,7 @@ func (fs *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
 	}
 
 	if conf.IsControllerServer {
-		fs.cs = NewControllerServer(fs.cd, cachePersister)
+		fs.cs = NewControllerServer(fs.cd)
 	}
 	if !conf.IsControllerServer && !conf.IsNodeServer {
 		topology, err = util.GetTopologyFromDomainLabels(conf.DomainLabels, conf.NodeID, conf.DriverName)
@@ -150,7 +144,7 @@ func (fs *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
 			klog.Fatalln(err)
 		}
 		fs.ns = NewNodeServer(fs.cd, conf.Vtype, topology)
-		fs.cs = NewControllerServer(fs.cd, cachePersister)
+		fs.cs = NewControllerServer(fs.cd)
 	}
 
 	server := csicommon.NewNonBlockingGRPCServer()

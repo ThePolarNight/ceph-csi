@@ -26,25 +26,19 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 // ControllerServer struct of CEPH CSI driver with supported methods of CSI
 // controller server spec.
 type ControllerServer struct {
 	*csicommon.DefaultControllerServer
-	MetadataStore util.CachePersister
 	// A map storing all volumes with ongoing operations so that additional operations
 	// for that same volume (as defined by VolumeID/volume name) return an Aborted error
 	VolumeLocks *util.VolumeLocks
 }
 
-type controllerCacheEntry struct {
-	VolOptions volumeOptions
-	VolumeID   volumeID
-}
-
-// createBackingVolume creates the backing subvolume and on any error cleans up any created entities
+// createBackingVolume creates the backing subvolume and on any error cleans up any created entities.
 func (cs *ControllerServer) createBackingVolume(ctx context.Context, volOptions *volumeOptions, vID *volumeIdentifier, secret map[string]string) error {
 	cr, err := util.NewAdminCredentials(secret)
 	if err != nil {
@@ -60,7 +54,7 @@ func (cs *ControllerServer) createBackingVolume(ctx context.Context, volOptions 
 	return nil
 }
 
-// CreateVolume creates a reservation and the volume in backend, if it is not already present
+// CreateVolume creates a reservation and the volume in backend, if it is not already present.
 func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	if err := cs.validateCreateVolumeRequest(req); err != nil {
 		klog.Errorf(util.Log(ctx, "CreateVolumeRequest validation failed: %v"), err)
@@ -136,9 +130,8 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully created backing volume named %s for request name %s"),
+	util.DebugLog(ctx, "cephfs: successfully created backing volume named %s for request name %s",
 		vID.FsSubvolName, requestName)
-
 	volumeContext := req.GetParameters()
 	volumeContext["subvolumeName"] = vID.FsSubvolName
 	volume := &csi.Volume{
@@ -157,73 +150,7 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	return &csi.CreateVolumeResponse{Volume: volume}, nil
 }
 
-// deleteVolumeDeprecated is used to delete volumes created using version 1.0.0 of the plugin,
-// that have state information stored in files or kubernetes config maps
-func (cs *ControllerServer) deleteVolumeDeprecated(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	var (
-		volID   = volumeID(req.GetVolumeId())
-		secrets = req.GetSecrets()
-	)
-
-	ce := &controllerCacheEntry{}
-	if err := cs.MetadataStore.Get(string(volID), ce); err != nil {
-		if err, ok := err.(*util.CacheEntryNotFound); ok {
-			klog.Warningf(util.Log(ctx, "cephfs: metadata for volume %s not found, assuming the volume to be already deleted (%v)"), volID, err)
-			return &csi.DeleteVolumeResponse{}, nil
-		}
-
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	if !ce.VolOptions.ProvisionVolume {
-		// DeleteVolume() is forbidden for statically provisioned volumes!
-
-		klog.Warningf(util.Log(ctx, "volume %s is provisioned statically, aborting delete"), volID)
-		return &csi.DeleteVolumeResponse{}, nil
-	}
-
-	// mons may have changed since create volume,
-	// retrieve the latest mons and override old mons
-	if mon, secretsErr := util.GetMonValFromSecret(secrets); secretsErr == nil && len(mon) > 0 {
-		klog.V(3).Infof(util.Log(ctx, "overriding monitors [%q] with [%q] for volume %s"), ce.VolOptions.Monitors, mon, volID)
-		ce.VolOptions.Monitors = mon
-	}
-
-	// Deleting a volume requires admin credentials
-
-	cr, err := util.NewAdminCredentials(secrets)
-	if err != nil {
-		klog.Errorf(util.Log(ctx, "failed to retrieve admin credentials: %v"), err)
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	defer cr.DeleteCredentials()
-
-	if acquired := cs.VolumeLocks.TryAcquire(string(volID)); !acquired {
-		klog.Errorf(util.Log(ctx, util.VolumeOperationAlreadyExistsFmt), volID)
-		return nil, status.Errorf(codes.Aborted, util.VolumeOperationAlreadyExistsFmt, string(volID))
-	}
-	defer cs.VolumeLocks.Release(string(volID))
-
-	if err = purgeVolumeDeprecated(ctx, volID, cr, &ce.VolOptions); err != nil {
-		klog.Errorf(util.Log(ctx, "failed to delete volume %s: %v"), volID, err)
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	if err = deleteCephUserDeprecated(ctx, &ce.VolOptions, cr, volID); err != nil {
-		klog.Errorf(util.Log(ctx, "failed to delete ceph user for volume %s: %v"), volID, err)
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	if err = cs.MetadataStore.Delete(string(volID)); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully deleted volume %s"), volID)
-
-	return &csi.DeleteVolumeResponse{}, nil
-}
-
-// DeleteVolume deletes the volume in backend and its reservation
+// DeleteVolume deletes the volume in backend and its reservation.
 func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	if err := cs.validateDeleteVolumeRequest(); err != nil {
 		klog.Errorf(util.Log(ctx, "DeleteVolumeRequest validation failed: %v"), err)
@@ -245,28 +172,19 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 	if err != nil {
 		// if error is ErrPoolNotFound, the pool is already deleted we dont
 		// need to worry about deleting subvolume or omap data, return success
-		var epnf util.ErrPoolNotFound
-		if errors.As(err, &epnf) {
+		if errors.Is(err, util.ErrPoolNotFound) {
 			klog.Warningf(util.Log(ctx, "failed to get backend volume for %s: %v"), string(volID), err)
 			return &csi.DeleteVolumeResponse{}, nil
 		}
 		// if error is ErrKeyNotFound, then a previous attempt at deletion was complete
 		// or partially complete (subvolume and imageOMap are garbage collected already), hence
 		// return success as deletion is complete
-		var eknf util.ErrKeyNotFound
-		if errors.As(err, &eknf) {
+		if errors.Is(err, util.ErrKeyNotFound) {
 			return &csi.DeleteVolumeResponse{}, nil
 		}
 
-		// ErrInvalidVolID may mean this is an 1.0.0 version volume
-		var eivi ErrInvalidVolID
-		if errors.As(err, &eivi) && cs.MetadataStore != nil {
-			return cs.deleteVolumeDeprecated(ctx, req)
-		}
-
 		// All errors other than ErrVolumeNotFound should return an error back to the caller
-		var evnf ErrVolumeNotFound
-		if !errors.As(err, &evnf) {
+		if !errors.Is(err, ErrVolumeNotFound) {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
@@ -302,8 +220,7 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 	if err = purgeVolume(ctx, volumeID(vID.FsSubvolName), cr, volOptions); err != nil {
 		klog.Errorf(util.Log(ctx, "failed to delete volume %s: %v"), volID, err)
 		// All errors other than ErrVolumeNotFound should return an error back to the caller
-		var evnf ErrVolumeNotFound
-		if !errors.As(err, &evnf) {
+		if !errors.Is(err, ErrVolumeNotFound) {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
@@ -312,7 +229,7 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully deleted volume %s"), volID)
+	util.DebugLog(ctx, "cephfs: successfully deleted volume %s", volID)
 
 	return &csi.DeleteVolumeResponse{}, nil
 }
@@ -335,7 +252,7 @@ func (cs *ControllerServer) ValidateVolumeCapabilities(
 	}, nil
 }
 
-// ControllerExpandVolume expands CephFS Volumes on demand based on resizer request
+// ControllerExpandVolume expands CephFS Volumes on demand based on resizer request.
 func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
 	if err := cs.validateExpandVolumeRequest(req); err != nil {
 		klog.Errorf(util.Log(ctx, "ControllerExpandVolumeRequest validation failed: %v"), err)

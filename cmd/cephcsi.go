@@ -20,7 +20,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 
@@ -29,7 +28,7 @@ import (
 	"github.com/ceph/ceph-csi/internal/rbd"
 	"github.com/ceph/ceph-csi/internal/util"
 
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 const (
@@ -40,6 +39,9 @@ const (
 	rbdDefaultName      = "rbd.csi.ceph.com"
 	cephfsDefaultName   = "cephfs.csi.ceph.com"
 	livenessDefaultName = "liveness.csi.ceph.com"
+
+	pollTime     = 60 // seconds
+	probeTimeout = 3  // seconds
 )
 
 var (
@@ -54,8 +56,6 @@ func init() {
 	flag.StringVar(&conf.NodeID, "nodeid", "", "node id")
 	flag.StringVar(&conf.InstanceID, "instanceid", "", "Unique ID distinguishing this instance of Ceph CSI among other"+
 		" instances, when sharing Ceph clusters across CSI instances for provisioning")
-	flag.StringVar(&conf.MetadataStorage, "metadatastorage", "", "metadata persistence method [node|k8s_configmap]")
-	flag.StringVar(&conf.PluginPath, "pluginpath", "/var/lib/kubelet/plugins/", "the location of cephcsi plugin")
 	flag.IntVar(&conf.PidLimit, "pidlimit", 0, "the PID limit to configure through cgroups")
 	flag.BoolVar(&conf.IsControllerServer, "controllerserver", false, "start cephcsi controller server")
 	flag.BoolVar(&conf.IsNodeServer, "nodeserver", false, "start cephcsi node server")
@@ -63,15 +63,13 @@ func init() {
 		" domain the node belongs to, separated by ','")
 
 	// cephfs related flags
-	// marking this as deprecated, remove it in next major release
-	flag.StringVar(&conf.MountCacheDir, "mountcachedir", "", "mount info cache save dir")
 	flag.BoolVar(&conf.ForceKernelCephFS, "forcecephkernelclient", false, "enable Ceph Kernel clients on kernel < 4.17 which support quotas")
 
 	// liveness/grpc metrics related flags
 	flag.IntVar(&conf.MetricsPort, "metricsport", 8080, "TCP port for liveness/grpc metrics requests")
 	flag.StringVar(&conf.MetricsPath, "metricspath", "/metrics", "path of prometheus endpoint where metrics will be available")
-	flag.DurationVar(&conf.PollTime, "polltime", time.Second*60, "time interval in seconds between each poll")
-	flag.DurationVar(&conf.PoolTimeout, "timeout", time.Second*3, "probe timeout in seconds")
+	flag.DurationVar(&conf.PollTime, "polltime", time.Second*pollTime, "time interval in seconds between each poll")
+	flag.DurationVar(&conf.PoolTimeout, "timeout", time.Second*probeTimeout, "probe timeout in seconds")
 
 	flag.BoolVar(&conf.EnableGRPCMetrics, "enablegrpcmetrics", false, "[DEPRECATED] enable grpc metrics")
 	flag.StringVar(&conf.HistogramOption, "histogramoption", "0.5,2,6",
@@ -122,9 +120,7 @@ func main() {
 		}
 		os.Exit(0)
 	}
-
-	klog.V(1).Infof("Driver version: %s and Git version: %s", util.DriverVersion, util.GitCommit)
-	var cp util.CachePersister
+	util.DefaultLog("Driver version: %s and Git version: %s", util.DriverVersion, util.GitCommit)
 
 	if conf.Vtype == "" {
 		klog.Fatalln("driver type not specified")
@@ -135,14 +131,6 @@ func main() {
 	if err != nil {
 		klog.Fatalln(err) // calls exit
 	}
-	csipluginPath := filepath.Join(conf.PluginPath, dname)
-	if conf.MetadataStorage != "" {
-		cp, err = util.CreatePersistanceStorage(
-			csipluginPath, conf.MetadataStorage, conf.PluginPath)
-		if err != nil {
-			os.Exit(1)
-		}
-	}
 
 	// the driver may need a higher PID limit for handling all concurrent requests
 	if conf.PidLimit != 0 {
@@ -150,7 +138,7 @@ func main() {
 		if pidErr != nil {
 			klog.Errorf("Failed to get the PID limit, can not reconfigure: %v", pidErr)
 		} else {
-			klog.V(1).Infof("Initial PID limit is set to %d", currentLimit)
+			util.DefaultLog("Initial PID limit is set to %d", currentLimit)
 			err = util.SetPIDLimit(conf.PidLimit)
 			if err != nil {
 				klog.Errorf("Failed to set new PID limit to %d: %v", conf.PidLimit, err)
@@ -159,7 +147,7 @@ func main() {
 				if conf.PidLimit == -1 {
 					s = " (max)"
 				}
-				klog.V(1).Infof("Reconfigured PID limit to %d%s", conf.PidLimit, s)
+				util.DefaultLog("Reconfigured PID limit to %d%s", conf.PidLimit, s)
 			}
 		}
 	}
@@ -178,20 +166,17 @@ func main() {
 		}
 	}
 
-	klog.V(1).Infof("Starting driver type: %v with name: %v", conf.Vtype, dname)
+	util.DefaultLog("Starting driver type: %v with name: %v", conf.Vtype, dname)
 	switch conf.Vtype {
 	case rbdType:
 		validateCloneDepthFlag(&conf)
 		validateMaxSnaphostFlag(&conf)
 		driver := rbd.NewDriver()
-		driver.Run(&conf, cp)
+		driver.Run(&conf)
 
 	case cephfsType:
-		if conf.MountCacheDir != "" {
-			klog.Warning("mountcachedir option is deprecated")
-		}
 		driver := cephfs.NewDriver()
-		driver.Run(&conf, cp)
+		driver.Run(&conf)
 
 	case livenessType:
 		liveness.Run(&conf)

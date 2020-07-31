@@ -22,10 +22,12 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
+
+	"github.com/ceph/ceph-csi/internal/util"
 )
 
-// CSIDriver stores driver information
+// CSIDriver stores driver information.
 type CSIDriver struct {
 	name    string
 	nodeID  string
@@ -65,7 +67,7 @@ func NewCSIDriver(name, v, nodeID string) *CSIDriver {
 }
 
 // ValidateControllerServiceRequest validates the controller
-// plugin capabilities
+// plugin capabilities.
 func (d *CSIDriver) ValidateControllerServiceRequest(c csi.ControllerServiceCapability_RPC_Type) error {
 	if c == csi.ControllerServiceCapability_RPC_UNKNOWN {
 		return nil
@@ -80,30 +82,30 @@ func (d *CSIDriver) ValidateControllerServiceRequest(c csi.ControllerServiceCapa
 }
 
 // AddControllerServiceCapabilities stores the controller capabilities
-// in driver object
+// in driver object.
 func (d *CSIDriver) AddControllerServiceCapabilities(cl []csi.ControllerServiceCapability_RPC_Type) {
 	var csc []*csi.ControllerServiceCapability
 
 	for _, c := range cl {
-		klog.V(1).Infof("Enabling controller service capability: %v", c.String())
+		util.DefaultLog("Enabling controller service capability: %v", c.String())
 		csc = append(csc, NewControllerServiceCapability(c))
 	}
 
 	d.cap = csc
 }
 
-// AddVolumeCapabilityAccessModes stores volume access modes
+// AddVolumeCapabilityAccessModes stores volume access modes.
 func (d *CSIDriver) AddVolumeCapabilityAccessModes(vc []csi.VolumeCapability_AccessMode_Mode) []*csi.VolumeCapability_AccessMode {
 	var vca []*csi.VolumeCapability_AccessMode
 	for _, c := range vc {
-		klog.V(1).Infof("Enabling volume access mode: %v", c.String())
+		util.DefaultLog("Enabling volume access mode: %v", c.String())
 		vca = append(vca, NewVolumeCapabilityAccessMode(c))
 	}
 	d.vc = vca
 	return vca
 }
 
-// GetVolumeCapabilityAccessModes returns access modes
+// GetVolumeCapabilityAccessModes returns access modes.
 func (d *CSIDriver) GetVolumeCapabilityAccessModes() []*csi.VolumeCapability_AccessMode {
 	return d.vc
 }

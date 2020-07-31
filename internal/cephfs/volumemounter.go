@@ -29,7 +29,7 @@ import (
 
 	"github.com/ceph/ceph-csi/internal/util"
 
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 const (
@@ -47,6 +47,7 @@ var (
 
 	fusePidRx = regexp.MustCompile(`(?m)^ceph-fuse\[(.+)\]: starting fuse$`)
 
+	// nolint:gomnd // numbers specify Kernel versions.
 	quotaSupport = []util.KernelVersion{
 		{
 			Version:      4,
@@ -67,7 +68,7 @@ var (
 )
 
 // Load available ceph mounters installed on system into availableMounters
-// Called from driver.go's Run()
+// Called from driver.go's Run().
 func loadAvailableMounters(conf *util.Config) error {
 	// #nosec
 	fuseMounterProbe := exec.Command("ceph-fuse", "--version")
@@ -85,10 +86,10 @@ func loadAvailableMounters(conf *util.Config) error {
 		}
 
 		if conf.ForceKernelCephFS || util.CheckKernelSupport(release, quotaSupport) {
-			klog.V(1).Infof("loaded mounter: %s", volumeMounterKernel)
+			util.DefaultLog("loaded mounter: %s", volumeMounterKernel)
 			availableMounters = append(availableMounters, volumeMounterKernel)
 		} else {
-			klog.V(1).Infof("kernel version < 4.17 might not support quota feature, hence not loading kernel client")
+			util.DefaultLog("kernel version < 4.17 might not support quota feature, hence not loading kernel client")
 		}
 	}
 
@@ -96,7 +97,7 @@ func loadAvailableMounters(conf *util.Config) error {
 	if err != nil {
 		klog.Errorf("failed to run ceph-fuse %v", err)
 	} else {
-		klog.V(1).Infof("loaded mounter: %s", volumeMounterFuse)
+		util.DefaultLog("loaded mounter: %s", volumeMounterFuse)
 		availableMounters = append(availableMounters, volumeMounterFuse)
 	}
 
@@ -131,7 +132,7 @@ func newMounter(volOptions *volumeOptions) (volumeMounter, error) {
 	if chosenMounter == "" {
 		// Otherwise pick whatever is left
 		chosenMounter = availableMounters[0]
-		klog.V(4).Infof("requested mounter: %s, chosen mounter: %s", wantMounter, chosenMounter)
+		util.DebugLogMsg("requested mounter: %s, chosen mounter: %s", wantMounter, chosenMounter)
 	}
 
 	// Create the mounter
@@ -166,7 +167,7 @@ func mountFuse(ctx context.Context, mountPoint string, cr *util.Credentials, vol
 		args = append(args, "--client_mds_namespace="+volOptions.FsName)
 	}
 
-	_, stderr, err := execCommand(ctx, "ceph-fuse", args[:]...)
+	_, stderr, err := util.ExecCommand(ctx, "ceph-fuse", args[:]...)
 	if err != nil {
 		return err
 	}
@@ -175,14 +176,17 @@ func mountFuse(ctx context.Context, mountPoint string, cr *util.Credentials, vol
 	// We need "starting fuse" meaning the mount is ok
 	// and PID of the ceph-fuse daemon for unmount
 
-	match := fusePidRx.FindSubmatch(stderr)
-	if len(match) != 2 {
+	match := fusePidRx.FindSubmatch([]byte(stderr))
+	// validMatchLength is set to 2 as match is expected
+	// to have 2 items, starting fuse and PID of the fuse daemon
+	const validMatchLength = 2
+	if len(match) != validMatchLength {
 		return fmt.Errorf("ceph-fuse failed: %s", stderr)
 	}
 
 	pid, err := strconv.Atoi(string(match[1]))
 	if err != nil {
-		return fmt.Errorf("failed to parse FUSE daemon PID: %v", err)
+		return fmt.Errorf("failed to parse FUSE daemon PID: %w", err)
 	}
 
 	fusePidMapMtx.Lock()

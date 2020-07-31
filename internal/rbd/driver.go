@@ -22,7 +22,7 @@ import (
 	"github.com/ceph/ceph-csi/internal/util"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 	"k8s.io/utils/mount"
 )
 
@@ -34,7 +34,7 @@ const (
 	csiConfigFile = "/etc/ceph-csi-config/config.json"
 )
 
-// Driver contains the default identity,node and controller struct
+// Driver contains the default identity,node and controller struct.
 type Driver struct {
 	cd *csicommon.CSIDriver
 
@@ -62,25 +62,25 @@ var (
 	skipForceFlatten     bool
 )
 
-// NewDriver returns new rbd driver
+// NewDriver returns new rbd driver.
 func NewDriver() *Driver {
 	return &Driver{}
 }
 
-// NewIdentityServer initialize a identity server for rbd CSI driver
+// NewIdentityServer initialize a identity server for rbd CSI driver.
 func NewIdentityServer(d *csicommon.CSIDriver) *IdentityServer {
 	return &IdentityServer{
 		DefaultIdentityServer: csicommon.NewDefaultIdentityServer(d),
 	}
 }
 
-// NewControllerServer initialize a controller server for rbd CSI driver
-func NewControllerServer(d *csicommon.CSIDriver, cachePersister util.CachePersister) *ControllerServer {
+// NewControllerServer initialize a controller server for rbd CSI driver.
+func NewControllerServer(d *csicommon.CSIDriver) *ControllerServer {
 	return &ControllerServer{
 		DefaultControllerServer: csicommon.NewDefaultControllerServer(d),
-		MetadataStore:           cachePersister,
 		VolumeLocks:             util.NewVolumeLocks(),
 		SnapshotLocks:           util.NewVolumeLocks(),
+		OperationLocks:          util.NewOperationLock(),
 	}
 }
 
@@ -95,8 +95,8 @@ func NewNodeServer(d *csicommon.CSIDriver, t string, topology map[string]string)
 }
 
 // Run start a non-blocking grpc controller,node and identityserver for
-// rbd CSI driver which can serve multiple parallel requests
-func (r *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
+// rbd CSI driver which can serve multiple parallel requests.
+func (r *Driver) Run(conf *util.Config) {
 	var err error
 	var topology map[string]string
 
@@ -155,7 +155,7 @@ func (r *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
 	}
 
 	if conf.IsControllerServer {
-		r.cs = NewControllerServer(r.cd, cachePersister)
+		r.cs = NewControllerServer(r.cd)
 	}
 	if !conf.IsControllerServer && !conf.IsNodeServer {
 		topology, err = util.GetTopologyFromDomainLabels(conf.DomainLabels, conf.NodeID, conf.DriverName)
@@ -166,7 +166,7 @@ func (r *Driver) Run(conf *util.Config, cachePersister util.CachePersister) {
 		if err != nil {
 			klog.Fatalf("failed to start node server, err %v\n", err)
 		}
-		r.cs = NewControllerServer(r.cd, cachePersister)
+		r.cs = NewControllerServer(r.cd)
 	}
 
 	s := csicommon.NewNonBlockingGRPCServer()

@@ -17,76 +17,41 @@ limitations under the License.
 package cephfs
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/ceph/ceph-csi/internal/util"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
 )
 
 type volumeID string
 
-func execCommand(ctx context.Context, program string, args ...string) (stdout, stderr []byte, err error) {
-	var (
-		cmd           = exec.Command(program, args...) // nolint: gosec, #nosec
-		sanitizedArgs = util.StripSecretInArgs(args)
-		stdoutBuf     bytes.Buffer
-		stderrBuf     bytes.Buffer
-	)
-
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-
-	klog.V(4).Infof(util.Log(ctx, "cephfs: EXEC %s %s"), program, sanitizedArgs)
-
-	if err := cmd.Run(); err != nil {
-		if cmd.Process == nil {
-			return nil, nil, fmt.Errorf("cannot get process pid while running %s %v: %v: %s",
-				program, sanitizedArgs, err, stderrBuf.Bytes())
-		}
-		return nil, nil, fmt.Errorf("an error occurred while running (%d) %s %v: %v: %s",
-			cmd.Process.Pid, program, sanitizedArgs, err, stderrBuf.Bytes())
-	}
-
-	return stdoutBuf.Bytes(), stderrBuf.Bytes(), nil
-}
-
 func execCommandErr(ctx context.Context, program string, args ...string) error {
-	_, _, err := execCommand(ctx, program, args...)
+	_, _, err := util.ExecCommand(ctx, program, args...)
 	return err
 }
 
-//nolint: unparam
 func execCommandJSON(ctx context.Context, v interface{}, program string, args ...string) error {
-	stdout, _, err := execCommand(ctx, program, args...)
+	stdout, _, err := util.ExecCommand(ctx, program, args...)
 	if err != nil {
 		return err
 	}
 
-	if err = json.Unmarshal(stdout, v); err != nil {
-		return fmt.Errorf("failed to unmarshal JSON for %s %v: %s: %v", program, util.StripSecretInArgs(args), stdout, err)
+	if err = json.Unmarshal([]byte(stdout), v); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON for %s %v: %s: %w", program, util.StripSecretInArgs(args), stdout, err)
 	}
 
 	return nil
 }
 
-func pathExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-// Controller service request validation
+// Controller service request validation.
 func (cs *ControllerServer) validateCreateVolumeRequest(req *csi.CreateVolumeRequest) error {
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		return fmt.Errorf("invalid CreateVolumeRequest: %v", err)
+		return fmt.Errorf("invalid CreateVolumeRequest: %w", err)
 	}
 
 	if req.GetName() == "" {
@@ -109,16 +74,16 @@ func (cs *ControllerServer) validateCreateVolumeRequest(req *csi.CreateVolumeReq
 
 func (cs *ControllerServer) validateDeleteVolumeRequest() error {
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		return fmt.Errorf("invalid DeleteVolumeRequest: %v", err)
+		return fmt.Errorf("invalid DeleteVolumeRequest: %w", err)
 	}
 
 	return nil
 }
 
-// Controller expand volume request validation
+// Controller expand volume request validation.
 func (cs *ControllerServer) validateExpandVolumeRequest(req *csi.ControllerExpandVolumeRequest) error {
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_EXPAND_VOLUME); err != nil {
-		return fmt.Errorf("invalid ExpandVolumeRequest: %v", err)
+		return fmt.Errorf("invalid ExpandVolumeRequest: %w", err)
 	}
 
 	if req.GetVolumeId() == "" {

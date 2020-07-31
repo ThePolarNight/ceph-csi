@@ -23,7 +23,7 @@ import (
 	"github.com/ceph/ceph-csi/internal/util"
 
 	"github.com/ceph/go-ceph/rados"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 // listExcess is the number of false-positive key-value pairs we will
@@ -37,7 +37,7 @@ func getOMapValues(
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
-		return nil, omapPoolError(poolName, err)
+		return nil, omapPoolError(err)
 	}
 	defer ioctx.Destroy()
 
@@ -66,13 +66,12 @@ func getOMapValues(
 			klog.Errorf(
 				util.Log(ctx, "omap not found (pool=%q, namespace=%q, name=%q): %v"),
 				poolName, namespace, oid, err)
-			return nil, util.NewErrKeyNotFound(oid, err)
+			return nil, util.JoinErrors(util.ErrKeyNotFound, err)
 		}
 		return nil, err
 	}
 
-	klog.V(4).Infof(
-		util.Log(ctx, "got omap values: (pool=%q, namespace=%q, name=%q): %+v"),
+	util.DebugLog(ctx, "got omap values: (pool=%q, namespace=%q, name=%q): %+v",
 		poolName, namespace, oid, results)
 	return results, nil
 }
@@ -84,7 +83,7 @@ func removeMapKeys(
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
-		return omapPoolError(poolName, err)
+		return omapPoolError(err)
 	}
 	defer ioctx.Destroy()
 
@@ -98,8 +97,7 @@ func removeMapKeys(
 			// the previous implementation of removing omap keys (via the cli)
 			// treated failure to find the omap as a non-error. Do so here to
 			// mimic the previous behavior.
-			klog.V(4).Infof(
-				util.Log(ctx, "when removing omap keys, omap not found (pool=%q, namespace=%q, name=%q): %+v"),
+			util.DebugLog(ctx, "when removing omap keys, omap not found (pool=%q, namespace=%q, name=%q): %+v",
 				poolName, namespace, oid, keys)
 		} else {
 			klog.Errorf(
@@ -108,8 +106,7 @@ func removeMapKeys(
 			return err
 		}
 	}
-	klog.V(4).Infof(
-		util.Log(ctx, "removed omap keys (pool=%q, namespace=%q, name=%q): %+v"),
+	util.DebugLog(ctx, "removed omap keys (pool=%q, namespace=%q, name=%q): %+v",
 		poolName, namespace, oid, keys)
 	return nil
 }
@@ -121,7 +118,7 @@ func setOMapKeys(
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
-		return omapPoolError(poolName, err)
+		return omapPoolError(err)
 	}
 	defer ioctx.Destroy()
 
@@ -140,15 +137,14 @@ func setOMapKeys(
 			poolName, namespace, oid, pairs, err)
 		return err
 	}
-	klog.V(4).Infof(
-		util.Log(ctx, "set omap keys (pool=%q, namespace=%q, name=%q): %+v)"),
+	util.DebugLog(ctx, "set omap keys (pool=%q, namespace=%q, name=%q): %+v)",
 		poolName, namespace, oid, pairs)
 	return nil
 }
 
-func omapPoolError(poolName string, err error) error {
+func omapPoolError(err error) error {
 	if errors.Is(err, rados.ErrNotFound) {
-		return util.NewErrPoolNotFound(poolName, err)
+		return util.JoinErrors(util.ErrPoolNotFound, err)
 	}
 	return err
 }

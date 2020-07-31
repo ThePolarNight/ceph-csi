@@ -29,7 +29,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 // NodeServer struct of ceph CSI driver with supported methods of CSI
@@ -53,14 +53,14 @@ func getCredentialsForVolume(volOptions *volumeOptions, req *csi.NodeStageVolume
 
 		cr, err = util.NewAdminCredentials(secrets)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get admin credentials from node stage secrets: %v", err)
+			return nil, fmt.Errorf("failed to get admin credentials from node stage secrets: %w", err)
 		}
 	} else {
 		// The volume is pre-made, credentials are in node stage secrets
 
 		cr, err = util.NewUserCredentials(req.GetSecrets())
 		if err != nil {
-			return nil, fmt.Errorf("failed to get user credentials from node stage secrets: %v", err)
+			return nil, fmt.Errorf("failed to get user credentials from node stage secrets: %w", err)
 		}
 	}
 
@@ -89,21 +89,19 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 
 	volOptions, _, err := newVolumeOptionsFromVolID(ctx, string(volID), req.GetVolumeContext(), req.GetSecrets())
 	if err != nil {
-		var eivi ErrInvalidVolID
-		if !errors.As(err, &eivi) {
+		if !errors.Is(err, ErrInvalidVolID) {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
-		// check for pre-provisioned volumes (plugin versions > 1.0.0)
+		// gets mon IPs from the supplied cluster info
 		volOptions, _, err = newVolumeOptionsFromStaticVolume(string(volID), req.GetVolumeContext())
 		if err != nil {
-			var ensv ErrNonStaticVolume
-			if !errors.As(err, &ensv) {
+			if !errors.Is(err, ErrNonStaticVolume) {
 				return nil, status.Error(codes.Internal, err.Error())
 			}
 
-			// check for volumes from plugin versions <= 1.0.0
-			volOptions, _, err = newVolumeOptionsFromVersion1Context(string(volID), req.GetVolumeContext(),
+			// get mon IPs from the volume context
+			volOptions, _, err = newVolumeOptionsFromMonitorList(string(volID), req.GetVolumeContext(),
 				req.GetSecrets())
 			if err != nil {
 				return nil, status.Error(codes.Internal, err.Error())
@@ -121,7 +119,7 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 
 	if isMnt {
-		klog.V(4).Infof(util.Log(ctx, "cephfs: volume %s is already mounted to %s, skipping"), volID, stagingTargetPath)
+		util.DebugLog(ctx, "cephfs: volume %s is already mounted to %s, skipping", volID, stagingTargetPath)
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -130,7 +128,7 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		return nil, err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully mounted volume %s to %s"), volID, stagingTargetPath)
+	util.DebugLog(ctx, "cephfs: successfully mounted volume %s to %s", volID, stagingTargetPath)
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }
@@ -152,7 +150,7 @@ func (*NodeServer) mount(ctx context.Context, volOptions *volumeOptions, req *cs
 		return status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: mounting volume %s with %s"), volID, m.name())
+	util.DebugLog(ctx, "cephfs: mounting volume %s with %s", volID, m.name())
 
 	readOnly := "ro"
 	fuseMountOptions := strings.Split(volOptions.FuseMountOptions, ",")
@@ -197,7 +195,7 @@ func (*NodeServer) mount(ctx context.Context, volOptions *volumeOptions, req *cs
 }
 
 // NodePublishVolume mounts the volume mounted to the staging path to the target
-// path
+// path.
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	mountOptions := []string{"bind", "_netdev"}
 	if err := util.ValidateNodePublishVolumeRequest(req); err != nil {
@@ -234,7 +232,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 
 	if isMnt {
-		klog.V(4).Infof(util.Log(ctx, "cephfs: volume %s is already bind-mounted to %s"), volID, targetPath)
+		util.DebugLog(ctx, "cephfs: volume %s is already bind-mounted to %s", volID, targetPath)
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 
@@ -245,12 +243,12 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully bind-mounted volume %s to %s"), volID, targetPath)
+	util.DebugLog(ctx, "cephfs: successfully bind-mounted volume %s to %s", volID, targetPath)
 
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-// NodeUnpublishVolume unmounts the volume from the target path
+// NodeUnpublishVolume unmounts the volume from the target path.
 func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	var err error
 	if err = util.ValidateNodeUnpublishVolumeRequest(req); err != nil {
@@ -276,12 +274,12 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully unbinded volume %s from %s"), req.GetVolumeId(), targetPath)
+	util.DebugLog(ctx, "cephfs: successfully unbinded volume %s from %s", req.GetVolumeId(), targetPath)
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
-// NodeUnstageVolume unstages the volume from the staging path
+// NodeUnstageVolume unstages the volume from the staging path.
 func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	var err error
 	if err = util.ValidateNodeUnstageVolumeRequest(req); err != nil {
@@ -301,12 +299,12 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "cephfs: successfully unmounted volume %s from %s"), req.GetVolumeId(), stagingTargetPath)
+	util.DebugLog(ctx, "cephfs: successfully unmounted volume %s from %s", req.GetVolumeId(), stagingTargetPath)
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
-// NodeGetCapabilities returns the supported capabilities of the node server
+// NodeGetCapabilities returns the supported capabilities of the node server.
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	return &csi.NodeGetCapabilitiesResponse{
 		Capabilities: []*csi.NodeServiceCapability{

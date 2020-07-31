@@ -32,14 +32,14 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/util/resizefs"
 	utilexec "k8s.io/utils/exec"
 	"k8s.io/utils/mount"
 )
 
 // NodeServer struct of ceph rbd driver with supported methods of CSI
-// node server spec
+// node server spec.
 type NodeServer struct {
 	*csicommon.DefaultNodeServer
 	mounter mount.Interface
@@ -50,7 +50,7 @@ type NodeServer struct {
 
 // stageTransaction struct represents the state a transaction was when it either completed
 // or failed
-// this transaction state can be used to rollback the transaction
+// this transaction state can be used to rollback the transaction.
 type stageTransaction struct {
 	// isStagePathCreated represents whether the mount path to stage the volume on was created or not
 	isStagePathCreated bool
@@ -62,10 +62,18 @@ type stageTransaction struct {
 	devicePath string
 }
 
+const (
+	// values for xfsHasReflink
+	xfsReflinkUnset int = iota
+	xfsReflinkNoSupport
+	xfsReflinkSupport
+)
+
 var (
 	kernelRelease = ""
 	// deepFlattenSupport holds the list of kernel which support mapping rbd
 	// image with deep-flatten image feature
+	// nolint:gomnd // numbers specify Kernel versions.
 	deepFlattenSupport = []util.KernelVersion{
 		{
 			Version:      5,
@@ -84,6 +92,10 @@ var (
 			Backport:     true,
 		}, // RHEL 8.2
 	}
+
+	// xfsHasReflink is set by xfsSupportsReflink(), use the function when
+	// checking the support for reflink
+	xfsHasReflink = xfsReflinkUnset
 )
 
 // NodeStageVolume mounts the volume to a staging path on the node.
@@ -99,7 +111,8 @@ var (
 //   - Map the image (creates a device)
 //   - Create the staging file/directory under staging path
 //   - Stage the device (mount the device mapped for image)
-// nolint: gocyclo
+// TODO: make this function less complex
+// nolint:gocyclo // complexity needs to be reduced.
 func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	if err := util.ValidateNodeStageVolumeRequest(req); err != nil {
 		return nil, err
@@ -151,27 +164,20 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 
 	if !isNotMnt {
-		klog.V(4).Infof(util.Log(ctx, "rbd: volume %s is already mounted to %s, skipping"), volID, stagingTargetPath)
+		util.DebugLog(ctx, "rbd: volume %s is already mounted to %s, skipping", volID, stagingTargetPath)
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
-	isLegacyVolume := isLegacyVolumeID(volID)
-	volOptions, err := genVolFromVolumeOptions(ctx, req.GetVolumeContext(), req.GetSecrets(), disableInUseChecks, isLegacyVolume)
+	volOptions, err := genVolFromVolumeOptions(ctx, req.GetVolumeContext(), req.GetSecrets(), disableInUseChecks)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	// get rbd image name from the volume journal
 	// for static volumes, the image name is actually the volume ID itself
-	// for legacy volumes (v1.0.0), the image name can be found in the staging path
 	switch {
 	case staticVol:
 		volOptions.RbdImageName = volID
-	case isLegacyVolume:
-		volOptions.RbdImageName, err = getLegacyVolumeName(stagingTargetPath)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
 	default:
 		var vi util.CSIIdentifier
 		var imageAttributes *journal.ImageAttributes
@@ -221,7 +227,7 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "rbd: successfully mounted volume %s to stagingTargetPath %s"), req.GetVolumeId(), stagingTargetPath)
+	util.DebugLog(ctx, "rbd: successfully mounted volume %s to stagingTargetPath %s", req.GetVolumeId(), stagingTargetPath)
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }
@@ -249,7 +255,7 @@ func (ns *NodeServer) stageTransaction(ctx context.Context, req *csi.NodeStageVo
 
 	// Allow image to be mounted on multiple nodes if it is ROX
 	if req.VolumeCapability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY {
-		klog.V(3).Infof(util.Log(ctx, "setting disableInUseChecks on rbd volume to: %v"), req.GetVolumeId)
+		util.ExtendedLog(ctx, "setting disableInUseChecks on rbd volume to: %v", req.GetVolumeId)
 		volOptions.DisableInUseChecks = true
 		volOptions.readOnly = true
 	}
@@ -268,7 +274,7 @@ func (ns *NodeServer) stageTransaction(ctx context.Context, req *csi.NodeStageVo
 				return transaction, err
 			}
 			if feature {
-				err = volOptions.flattenRbdImage(ctx, cr, true)
+				err = volOptions.flattenRbdImage(ctx, cr, true, rbdHardMaxCloneDepth, rbdSoftMaxCloneDepth)
 				if err != nil {
 					return transaction, err
 				}
@@ -282,7 +288,7 @@ func (ns *NodeServer) stageTransaction(ctx context.Context, req *csi.NodeStageVo
 		return transaction, err
 	}
 	transaction.devicePath = devicePath
-	klog.V(4).Infof(util.Log(ctx, "rbd image: %s/%s was successfully mapped at %s\n"),
+	util.DebugLog(ctx, "rbd image: %s/%s was successfully mapped at %s\n",
 		req.GetVolumeId(), volOptions.Pool, devicePath)
 
 	if volOptions.Encrypted {
@@ -383,7 +389,7 @@ func (ns *NodeServer) createStageMountPoint(ctx context.Context, mountPath strin
 }
 
 // NodePublishVolume mounts the volume mounted to the device path to the target
-// path
+// path.
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	err := util.ValidateNodePublishVolumeRequest(req)
 	if err != nil {
@@ -417,32 +423,8 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, err
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "rbd: successfully mounted stagingPath %s to targetPath %s"), stagingPath, targetPath)
+	util.DebugLog(ctx, "rbd: successfully mounted stagingPath %s to targetPath %s", stagingPath, targetPath)
 	return &csi.NodePublishVolumeResponse{}, nil
-}
-
-func getLegacyVolumeName(mountPath string) (string, error) {
-	var volName string
-
-	if strings.HasSuffix(mountPath, "/globalmount") {
-		s := strings.Split(strings.TrimSuffix(mountPath, "/globalmount"), "/")
-		volName = s[len(s)-1]
-		return volName, nil
-	}
-
-	if strings.HasSuffix(mountPath, "/mount") {
-		s := strings.Split(strings.TrimSuffix(mountPath, "/mount"), "/")
-		volName = s[len(s)-1]
-		return volName, nil
-	}
-
-	// get volume name for block volume
-	s := strings.Split(mountPath, "/")
-	if len(s) == 0 {
-		return "", fmt.Errorf("rbd: malformed value of stage target path: %s", mountPath)
-	}
-	volName = s[len(s)-1]
-	return volName, nil
 }
 
 func (ns *NodeServer) mountVolumeToStagePath(ctx context.Context, req *csi.NodeStageVolumeRequest, staticVol bool, stagingPath, devicePath string) (bool, error) {
@@ -490,6 +472,11 @@ func (ns *NodeServer) mountVolumeToStagePath(ctx context.Context, req *csi.NodeS
 			args = []string{"-m0", "-Enodiscard,lazy_itable_init=1,lazy_journal_init=1", devicePath}
 		} else if fsType == "xfs" {
 			args = []string{"-K", devicePath}
+			// always disable reflink
+			// TODO: make enabling an option, see ceph/ceph-csi#1256
+			if ns.xfsSupportsReflink() {
+				args = append(args, "-m", "reflink=0")
+			}
 		}
 		if len(args) > 0 {
 			cmdOut, cmdErr := diskMounter.Exec.Command("mkfs."+fsType, args...).CombinedOutput()
@@ -528,7 +515,7 @@ func (ns *NodeServer) mountVolume(ctx context.Context, stagingPath string, req *
 
 	mountOptions = csicommon.ConstructMountOptions(mountOptions, req.GetVolumeCapability())
 
-	klog.V(4).Infof(util.Log(ctx, "target %v\nisBlock %v\nfstype %v\nstagingPath %v\nreadonly %v\nmountflags %v\n"),
+	util.DebugLog(ctx, "target %v\nisBlock %v\nfstype %v\nstagingPath %v\nreadonly %v\nmountflags %v\n",
 		targetPath, isBlock, fsType, stagingPath, readOnly, mountOptions)
 
 	if readOnly {
@@ -550,11 +537,11 @@ func (ns *NodeServer) createTargetMountPath(ctx context.Context, mountPath strin
 				// #nosec
 				pathFile, e := os.OpenFile(mountPath, os.O_CREATE|os.O_RDWR, 0750)
 				if e != nil {
-					klog.V(4).Infof(util.Log(ctx, "Failed to create mountPath:%s with error: %v"), mountPath, err)
+					util.DebugLog(ctx, "Failed to create mountPath:%s with error: %v", mountPath, err)
 					return notMnt, status.Error(codes.Internal, e.Error())
 				}
 				if err = pathFile.Close(); err != nil {
-					klog.V(4).Infof(util.Log(ctx, "Failed to close mountPath:%s with error: %v"), mountPath, err)
+					util.DebugLog(ctx, "Failed to close mountPath:%s with error: %v", mountPath, err)
 					return notMnt, status.Error(codes.Internal, err.Error())
 				}
 			} else {
@@ -571,7 +558,7 @@ func (ns *NodeServer) createTargetMountPath(ctx context.Context, mountPath strin
 	return notMnt, err
 }
 
-// NodeUnpublishVolume unmounts the volume from the target path
+// NodeUnpublishVolume unmounts the volume from the target path.
 func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	err := util.ValidateNodeUnpublishVolumeRequest(req)
 	if err != nil {
@@ -591,7 +578,7 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	if err != nil {
 		if os.IsNotExist(err) {
 			// targetPath has already been deleted
-			klog.V(4).Infof(util.Log(ctx, "targetPath: %s has already been deleted"), targetPath)
+			util.DebugLog(ctx, "targetPath: %s has already been deleted", targetPath)
 			return &csi.NodeUnpublishVolumeResponse{}, nil
 		}
 		return nil, status.Error(codes.NotFound, err.Error())
@@ -611,13 +598,13 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "rbd: successfully unbound volume %s from %s"), req.GetVolumeId(), targetPath)
+	util.DebugLog(ctx, "rbd: successfully unbound volume %s from %s", req.GetVolumeId(), targetPath)
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
 // getStagingTargetPath concats either NodeStageVolumeRequest's or
-// NodeUnstageVolumeRequest's target path with the volumeID
+// NodeUnstageVolumeRequest's target path with the volumeID.
 func getStagingTargetPath(req interface{}) string {
 	switch vr := req.(type) {
 	case *csi.NodeStageVolumeRequest:
@@ -629,7 +616,7 @@ func getStagingTargetPath(req interface{}) string {
 	return ""
 }
 
-// NodeUnstageVolume unstages the volume from the staging path
+// NodeUnstageVolume unstages the volume from the staging path.
 func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	var err error
 	if err = util.ValidateNodeUnstageVolumeRequest(req); err != nil {
@@ -659,7 +646,7 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		// Unmounting the image
 		err = ns.mounter.Unmount(stagingTargetPath)
 		if err != nil {
-			klog.V(3).Infof(util.Log(ctx, "failed to unmount targetPath: %s with error: %v"), stagingTargetPath, err)
+			util.ExtendedLog(ctx, "failed to unmount targetPath: %s with error: %v", stagingTargetPath, err)
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
@@ -676,7 +663,7 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 
 	imgInfo, err := lookupRBDImageMetadataStash(stagingParentPath)
 	if err != nil {
-		klog.V(2).Infof(util.Log(ctx, "failed to find image metadata: %v"), err)
+		util.UsefulLog(ctx, "failed to find image metadata: %v", err)
 		// It is an error if it was mounted, as we should have found the image metadata file with
 		// no errors
 		if !notMnt {
@@ -684,8 +671,7 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		}
 
 		// If not mounted, and error is anything other than metadata file missing, it is an error
-		var ems ErrMissingStash
-		if !errors.As(err, &ems) {
+		if !errors.Is(err, ErrMissingStash) {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
@@ -701,7 +687,7 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	klog.V(4).Infof(util.Log(ctx, "successfully unmounted volume (%s) from staging path (%s)"),
+	util.DebugLog(ctx, "successfully unmounted volume (%s) from staging path (%s)",
 		req.GetVolumeId(), stagingTargetPath)
 
 	if err = cleanupRBDImageMetadataStash(stagingParentPath); err != nil {
@@ -712,7 +698,7 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
-// NodeExpandVolume resizes rbd volumes
+// NodeExpandVolume resizes rbd volumes.
 func (ns *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	if volumeID == "" {
@@ -772,7 +758,7 @@ func getDevicePath(ctx context.Context, volumePath string) (string, error) {
 	return "", fmt.Errorf("failed to get device for stagingtarget path %v", volumePath)
 }
 
-// NodeGetCapabilities returns the supported capabilities of the node server
+// NodeGetCapabilities returns the supported capabilities of the node server.
 func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	return &csi.NodeGetCapabilitiesResponse{
 		Capabilities: []*csi.NodeServiceCapability{
@@ -888,7 +874,7 @@ func openEncryptedDevice(ctx context.Context, volOptions *rbdVolume, devicePath 
 		return devicePath, err
 	}
 	if isOpen {
-		klog.V(4).Infof(util.Log(ctx, "encrypted device is already open at %s"), mapperFilePath)
+		util.DebugLog(ctx, "encrypted device is already open at %s", mapperFilePath)
 	} else {
 		err = util.OpenEncryptedVolume(ctx, devicePath, mapperFile, passphrase)
 		if err != nil {
@@ -899,4 +885,28 @@ func openEncryptedDevice(ctx context.Context, volOptions *rbdVolume, devicePath 
 	}
 
 	return mapperFilePath, nil
+}
+
+// xfsSupportsReflink checks if mkfs.xfs supports the "-m reflink=0|1"
+// argument. In case it is supported, return true.
+func (ns *NodeServer) xfsSupportsReflink() bool {
+	// return cached value, if set
+	if xfsHasReflink != xfsReflinkUnset {
+		return xfsHasReflink == xfsReflinkSupport
+	}
+
+	// run mkfs.xfs in the same namespace as formatting would be done in
+	// mountVolumeToStagePath()
+	diskMounter := &mount.SafeFormatAndMount{Interface: ns.mounter, Exec: utilexec.New()}
+	out, err := diskMounter.Exec.Command("mkfs.xfs").CombinedOutput()
+	if err != nil {
+		// mkfs.xfs should fail with an error message (and help text)
+		if strings.Contains(string(out), "reflink=0|1") {
+			xfsHasReflink = xfsReflinkSupport
+			return true
+		}
+	}
+
+	xfsHasReflink = xfsReflinkNoSupport
+	return false
 }

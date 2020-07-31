@@ -29,6 +29,8 @@ before_install:
   - gimme ${GOLANG_VERSION}
   - source ~/.gimme/envs/go${GOLANG_VERSION}.env
   - mkdir -p $GOPATH/bin
+  # csi release to use for upgrade testing
+  - export UPGRADE_VERSION=$(source build.env ; echo ${UPGRADE_VERSION})
 
 before_script:
   - export CV=$(source build.env ; echo ${CEPH_VERSION})
@@ -40,6 +42,7 @@ before_script:
   - sudo apt-get -qq update
   # only the arm64 fallback repo is unsigned and needs --allow-unauthenticated
   - sudo apt-get -y --allow-unauthenticated install librados-dev librbd-dev
+  - sudo apt-get -y install conntrack
 
 # Two stages for testing, each stage runs its jobs in parallel, but stages are
 # run after each other, unless the last stage fails.
@@ -95,25 +98,70 @@ jobs:
         - ./scripts/build-multi-arch-image.sh || travis_terminate 1;
 
     - stage: e2e testing
-      name: cephcsi with kube 1.16.9
+      name: CephFS with kubernetes v1.17.8
       script:
         - scripts/skip-doc-change.sh || travis_terminate 0;
         - make image-cephcsi || travis_terminate 1;
-        - scripts/travis-functest.sh v1.16.9 || travis_terminate 1;
+        - scripts/travis-functest.sh v1.17.8 --test-cephfs=true
+          --test-rbd=false || travis_terminate 1;
 
     - stage: e2e testing
-      name: cephcsi with kube 1.17.5
+      name: RBD with kubernetes v1.17.8
       script:
         - scripts/skip-doc-change.sh || travis_terminate 0;
         - make image-cephcsi || travis_terminate 1;
-        - scripts/travis-functest.sh v1.17.5 || travis_terminate 1;
+        - scripts/travis-functest.sh v1.17.8 --test-cephfs=false
+          --test-rbd=true || travis_terminate 1;
 
     - stage: e2e testing
-      name: cephcsi helm charts with kube 1.17.5
+      name: CephFS with kubernetes v1.18.5
       script:
         - scripts/skip-doc-change.sh || travis_terminate 0;
         - make image-cephcsi || travis_terminate 1;
-        - scripts/travis-helmtest.sh v1.17.5 || travis_terminate 1;
+        - scripts/travis-functest.sh v1.18.5 --test-cephfs=true
+          --test-rbd=false || travis_terminate 1;
+
+    - stage: e2e testing
+      name: RBD with kubernetes v1.18.5
+      script:
+        - scripts/skip-doc-change.sh || travis_terminate 0;
+        - make image-cephcsi || travis_terminate 1;
+        - scripts/travis-functest.sh v1.18.5 --test-cephfs=false
+          --test-rbd=true || travis_terminate 1;
+
+    - stage: e2e testing
+      name: CephFS helm charts with kubernetes v1.18.5
+      script:
+        - scripts/skip-doc-change.sh || travis_terminate 0;
+        - make image-cephcsi || travis_terminate 1;
+        - scripts/travis-helmtest.sh v1.18.5 --test-cephfs=true
+          --test-rbd=false || travis_terminate 1;
+
+    - stage: e2e testing
+      name: RBD helm charts with kubernetes v1.18.5
+      script:
+        - scripts/skip-doc-change.sh || travis_terminate 0;
+        - make image-cephcsi || travis_terminate 1;
+        - scripts/travis-helmtest.sh v1.18.5 --test-cephfs=false
+          --test-rbd=true || travis_terminate 1;
+
+    - stage: upgrade testing
+      name: CephFS upgrade tesing with CSI v2.1.2
+      script:
+        - scripts/skip-doc-change.sh || travis_terminate 0;
+        - make image-cephcsi || travis_terminate 1;
+        - scripts/travis-functest.sh v1.18.5 --test-cephfs=true
+          --test-rbd=false --upgrade-testing=true
+          --upgrade-version="${UPGRADE_VERSION}" || travis_terminate 1;
+
+    - stage: upgrade testing
+      name: RBD upgrade tesing with CSI v2.1.2
+      script:
+        - scripts/skip-doc-change.sh || travis_terminate 0;
+        - make image-cephcsi || travis_terminate 1;
+        - scripts/travis-functest.sh v1.18.5 --test-cephfs=false
+          --test-rbd=true --upgrade-testing=true
+          --upgrade-version="${UPGRADE_VERSION}" || travis_terminate 1;
 
     - stage: deploy
       name: push artifacts to repositories
