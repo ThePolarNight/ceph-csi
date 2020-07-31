@@ -3,6 +3,19 @@ apiVersion: v1
 kind: ConfigMap
 data:
   config.json: |-
-    []
+    [
+      {
+        "clusterID": "05a37111-a06b-46c5-b5d4-4db98ff96db4",
+        "monitors": [
+          "10.88.131.100",
+          "10.88.131.101",
+          "10.88.131.102"
+        ],
+        "cephFS": {
+          "subvolumeGroup": "csi"
+        }
+      }
+    ]
 metadata:
   name: ceph-csi-config
+  namespace: cephfs

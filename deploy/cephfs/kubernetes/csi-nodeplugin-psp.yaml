@@ -49,7 +49,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: cephfs-csi-nodeplugin-psp
   # replace with non-default namespace name
-  namespace: default
+  namespace: cephfs
 rules:
   - apiGroups: ['policy']
     resources: ['podsecuritypolicies']
@@ -62,12 +62,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: cephfs-csi-nodeplugin-psp
   # replace with non-default namespace name
-  namespace: default
+  namespace: cephfs
 subjects:
   - kind: ServiceAccount
     name: cephfs-csi-nodeplugin
     # replace with non-default namespace name
-    namespace: default
+    namespace: cephfs
 roleRef:
   kind: Role
   name: cephfs-csi-nodeplugin-psp

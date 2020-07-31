@@ -12,10 +12,10 @@ parameters:
   # Ensure to create an entry in the configmap named ceph-csi-config, based on
   # csi-config-map-sample.yaml, to accompany the string chosen to
   # represent the Ceph cluster in clusterID below
-  clusterID: <cluster-id>
+  clusterID: 05a37111-a06b-46c5-b5d4-4db98ff96db4
 
   # CephFS filesystem name into which the volume shall be created
-  fsName: myfs
+  fsName: cephfs
 
   # (optional) Ceph pool into which volume data shall be stored
   # pool: cephfs_data
@@ -30,11 +30,11 @@ parameters:
 
   # The secrets have to contain user and/or Ceph admin credentials.
   csi.storage.k8s.io/provisioner-secret-name: csi-cephfs-secret
-  csi.storage.k8s.io/provisioner-secret-namespace: default
+  csi.storage.k8s.io/provisioner-secret-namespace: cephfs
   csi.storage.k8s.io/controller-expand-secret-name: csi-cephfs-secret
-  csi.storage.k8s.io/controller-expand-secret-namespace: default
+  csi.storage.k8s.io/controller-expand-secret-namespace: cephfs
   csi.storage.k8s.io/node-stage-secret-name: csi-cephfs-secret
-  csi.storage.k8s.io/node-stage-secret-namespace: default
+  csi.storage.k8s.io/node-stage-secret-namespace: cephfs
 
   # (optional) The driver can use either ceph-fuse (fuse) or
   # ceph kernelclient (kernel).
